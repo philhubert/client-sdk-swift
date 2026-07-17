@@ -52,8 +52,8 @@ public class CameraCapturer: VideoCapturer, @unchecked Sendable {
     public var isMultitaskingAccessSupported: Bool {
         #if (os(iOS) || os(tvOS)) && !targetEnvironment(macCatalyst)
         if #available(iOS 16, *, tvOS 17, *) {
-            capturer.captureSession.beginConfiguration()
-            defer { capturer.captureSession.commitConfiguration() }
+            // Read directly — no begin/commitConfiguration bracket. Commit-time validation
+            // can crash if another capture session mutates state concurrently (iOS 26).
             return capturer.captureSession.isMultitaskingCameraAccessSupported
         }
         #endif
