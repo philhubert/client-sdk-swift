@@ -312,10 +312,10 @@ extension RemoteTrackPublication {
             log("Failed to send track settings: \(newValue), sid: \(sid), error: \(error)")
             // DokeTime fork: rethrow. The adaptiveStream timer stores the new settings before
             // calling this, so the revert above restores them, not the previous ones; without
-            // the error the timer believes the server has them and never retries. Every
-            // update made while the signal connection is down (any reconnect) was lost that
-            // way. The timer's catch reverts to the real previous settings and retries on the
-            // next tick; the public setters now report the failure to their caller.
+            // the error the timer believes the server has them and never retries. An update
+            // made while the signal client is .disconnected (between reconnect attempts) was
+            // lost that way. The timer's catch reverts to the real previous settings and
+            // retries on the next tick; the public setters now report the failure to their caller.
             throw error
         }
     }
@@ -359,6 +359,14 @@ extension RemoteTrackPublication {
         // don't continue if the engine is disconnected
         guard engineConnectionState != .disconnected else {
             log("engine is disconnected")
+            return
+        }
+
+        // DokeTime fork: a quick reconnect keeps the room .connected while the signal client is
+        // .disconnected between attempts, where every send fails. Skip the tick rather than fail
+        // and log about 3 times a second per video; state and a pending resync are untouched, so
+        // the first tick after the signal is back sends.
+        if let room = participant?._room, await room.signalClient.connectionState == .disconnected {
             return
         }
 

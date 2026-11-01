@@ -28,7 +28,10 @@ extension Room {
         if oldState.isReconnectingWithMode == .quick, state.isReconnectingWithMode == nil,
            state.connectionState == .connected
         {
-            resyncTrackSettings()
+            // This callback runs inside `_state`'s lock (StateSync invokes onDidMutate under
+            // it) and the resync reads `_state`: hop off it, as the permissions re-send below
+            // does. Calling it inline traps on the non-recursive lock.
+            Task { [weak self] in self?.resyncTrackSettings() }
         }
 
         if state.connectionState != oldState.connectionState {
