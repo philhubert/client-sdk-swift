@@ -21,13 +21,18 @@ internal import LiveKitWebRTC
 extension Room {
     // swiftlint:disable:next cyclomatic_complexity function_body_length
     func engine(_: Room, didMutateState state: Room.State, oldState: Room.State) {
+        // DokeTime fork: a quick reconnect never leaves .connected (`quickReconnectSequence`
+        // doesn't update connectionState) and clears its mode in the same mutation that
+        // re-asserts .connected, so upstream's check inside the connectionState change below
+        // never fired. Detect the completion by the mode clearing instead.
+        if oldState.isReconnectingWithMode == .quick, state.isReconnectingWithMode == nil,
+           state.connectionState == .connected
+        {
+            resyncTrackSettings()
+        }
+
         if state.connectionState != oldState.connectionState {
             // connectionState did update
-
-            // only if quick-reconnect
-            if case .connected = state.connectionState, case .quick = state.isReconnectingWithMode {
-                resetTrackSettings()
-            }
 
             // Re-send track permissions
             if case .connected = state.connectionState {

@@ -742,17 +742,21 @@ extension Room {
 // MARK: - Session Migration
 
 extension Room {
-    func resetTrackSettings() {
-        log("resetting track settings...")
+    /// DokeTime fork: replaces upstream's `resetTrackSettings()`, which only ran on a
+    /// connectionState change that a quick reconnect never makes (see `engine(_:didMutateState:)`).
+    /// Resetting would also have sent nothing for a video no renderer shows: its computed
+    /// settings equal the reset ones. A resync re-sends every adaptiveStream video's current
+    /// settings on its next tick.
+    func resyncTrackSettings() {
+        log("resyncing track settings after quick reconnect...")
 
         // create an array of RemoteTrackPublication
         let remoteTrackPublications = _state.remoteParticipants.values.map {
             $0._state.trackPublications.values.compactMap { $0 as? RemoteTrackPublication }
         }.joined()
 
-        // reset track settings for all RemoteTrackPublication
         for publication in remoteTrackPublications {
-            publication.resetTrackSettings()
+            publication.requestTrackSettingsResync()
         }
     }
 }

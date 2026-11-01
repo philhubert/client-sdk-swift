@@ -74,6 +74,9 @@ public class TrackPublication: NSObject, @unchecked Sendable, ObservableObject, 
         var trackSettings = TrackSettings()
         //
         var isSendingTrackSettings: Bool = false
+        // DokeTime fork: re-send trackSettings on the next adaptiveStream tick even if
+        // unchanged (see RemoteTrackPublication.requestTrackSettingsResync).
+        var isTrackSettingsResyncPending: Bool = false
 
         // Only for RemoteTrackPublications
         // user's preference to subscribe or not

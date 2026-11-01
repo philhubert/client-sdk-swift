@@ -1,0 +1,1 @@
+patch type="fixed" "DokeTime fork: adaptiveStream track settings lost during a reconnect are re-sent: send(trackSettings:) rethrows (the timer retried nothing after a failed signal send) and a quick reconnect now actually resyncs every adaptiveStream video (the upstream reset sat behind a connectionState change a quick reconnect never makes)"

@@ -265,6 +265,18 @@ extension RemoteTrackPublication {
         _state.mutate { $0.trackSettings = TrackSettings(enabled: initiallyEnabled) }
     }
 
+    /// DokeTime fork: after a quick reconnect the server's view of this subscription is
+    /// unknown. An update written while the old socket was dying is dropped without an error
+    /// (`SignalClient`'s request queue logs and swallows send failures), and the resumed
+    /// session keeps whatever the server last received. With adaptiveStream that can leave a
+    /// video paused server-side while this client believes it asked for it, frozen for this
+    /// subscriber until the computed settings next change. The next adaptiveStream tick
+    /// re-sends the current settings even if unchanged.
+    func requestTrackSettingsResync() {
+        guard isAdaptiveStreamEnabled else { return }
+        _state.mutate { $0.isTrackSettingsResyncPending = true }
+    }
+
     // attempt to send track settings
     func send(trackSettings newValue: TrackSettings) async throws {
         let participant = try await requireParticipant()
@@ -298,6 +310,13 @@ extension RemoteTrackPublication {
             }
 
             log("Failed to send track settings: \(newValue), sid: \(sid), error: \(error)")
+            // DokeTime fork: rethrow. The adaptiveStream timer stores the new settings before
+            // calling this, so the revert above restores them, not the previous ones; without
+            // the error the timer believes the server has them and never retries. Every
+            // update made while the signal connection is down (any reconnect) was lost that
+            // way. The timer's catch reverts to the real previous settings and retries on the
+            // next tick; the public setters now report the failure to their caller.
+            throw error
         }
     }
 }
@@ -358,7 +377,9 @@ extension RemoteTrackPublication {
             dimensions: .value(dimensions),
         )
 
-        guard _state.trackSettings != newSettings else {
+        // DokeTime fork: a pending resync (quick reconnect, or a failed send) sends even if unchanged.
+        let isResync = _state.isTrackSettingsResyncPending
+        guard isResync || _state.trackSettings != newSettings else {
             // no settings updated
             return
         }
@@ -366,7 +387,13 @@ extension RemoteTrackPublication {
         // keep old settings
         let oldSettings = _state.trackSettings
         // update state
-        _state.mutate { $0.trackSettings = newSettings }
+        _state.mutate {
+            $0.trackSettings = newSettings
+            $0.isTrackSettingsResyncPending = false
+        }
+        if isResync {
+            log("[adaptiveStream] resync: re-sending trackSettings, sid: \(sid), settings: \(newSettings)")
+        }
 
         // log when flipping from enabled -> disabled
         if oldSettings.isEnabled, !newSettings.isEnabled {
@@ -382,8 +409,13 @@ extension RemoteTrackPublication {
         do {
             try await send(trackSettings: newSettings)
         } catch {
-            // Revert to old settings on failure
-            _state.mutate { $0.trackSettings = oldSettings }
+            // Revert to old settings on failure. DokeTime fork: and leave a resync pending, so
+            // the next tick re-sends (and re-asserts `shouldReceive`, already flipped above)
+            // even if the computed settings have since swung back to `oldSettings`.
+            _state.mutate {
+                $0.trackSettings = oldSettings
+                $0.isTrackSettingsResyncPending = true
+            }
             log("[adaptiveStream] failed to send trackSettings, sid: \(sid) error: \(error)", .error)
         }
     }
