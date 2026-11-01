@@ -49,6 +49,25 @@ struct QuickReconnectResyncTests {
         }
     }
 
+    /// Every (old mode, new mode, new state) combination: only a quick reconnect's success fires.
+    @Test func onlyAQuickReconnectsSuccessCountsAsItsCompletion() {
+        let modes: [ReconnectMode?] = [nil, .quick, .full]
+        let states: [ConnectionState] = [.disconnected, .connecting, .reconnecting, .connected, .disconnecting]
+        for oldMode in modes {
+            for newMode in modes {
+                for newState in states {
+                    let expected = oldMode == .quick && newMode == nil && newState == .connected
+                    #expect(Room.didCompleteQuickReconnect(oldMode: oldMode, newMode: newMode,
+                                                           newConnectionState: newState) == expected,
+                            "\(String(describing: oldMode)) → \(String(describing: newMode)), \(newState)")
+                }
+            }
+        }
+        // Escalation keeps .connected and a mode set until the full sequence marks .reconnecting.
+        #expect(!Room.didCompleteQuickReconnect(oldMode: .quick, newMode: .full, newConnectionState: .connected))
+    }
+
+    /// Proves the resync runs off Room's state lock: with the call inline this test traps.
     @Test func quickReconnectCompletionRequestsAResync() async throws {
         let (room, publication) = try Self.roomWithRemoteVideo()
         #expect(!publication._state.isTrackSettingsResyncPending)

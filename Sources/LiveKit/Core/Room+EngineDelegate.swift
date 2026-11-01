@@ -19,14 +19,25 @@ import Foundation
 internal import LiveKitWebRTC
 
 extension Room {
+    /// DokeTime fork: a quick reconnect succeeded. It never leaves `.connected` and clears its
+    /// mode in the same mutation that re-asserts `.connected`; a full one leaves `.full`, an
+    /// escalation keeps a mode set, and a failed one ends `.disconnected`.
+    static func didCompleteQuickReconnect(oldMode: ReconnectMode?,
+                                          newMode: ReconnectMode?,
+                                          newConnectionState: ConnectionState) -> Bool
+    {
+        oldMode == .quick && newMode == nil && newConnectionState == .connected
+    }
+
     // swiftlint:disable:next cyclomatic_complexity function_body_length
     func engine(_: Room, didMutateState state: Room.State, oldState: Room.State) {
         // DokeTime fork: a quick reconnect never leaves .connected (`quickReconnectSequence`
         // doesn't update connectionState) and clears its mode in the same mutation that
         // re-asserts .connected, so upstream's check inside the connectionState change below
         // never fired. Detect the completion by the mode clearing instead.
-        if oldState.isReconnectingWithMode == .quick, state.isReconnectingWithMode == nil,
-           state.connectionState == .connected
+        if Self.didCompleteQuickReconnect(oldMode: oldState.isReconnectingWithMode,
+                                          newMode: state.isReconnectingWithMode,
+                                          newConnectionState: state.connectionState)
         {
             // This callback runs inside `_state`'s lock (StateSync invokes onDidMutate under
             // it) and the resync reads `_state`: hop off it, as the permissions re-send below
