@@ -1,0 +1,1 @@
+patch type="fixed" "DokeTime fork: the adaptiveStream timer reads a track's renderer table under the track's state lock. add/remove(videoRenderer:) change that table from other threads, and enumerating it unlocked could crash"

@@ -370,7 +370,7 @@ extension RemoteTrackPublication {
             return
         }
 
-        let videoRenderers = track?._state.videoRendererAdapters.objectEnumerator()?.allObjects.compactMap { ($0 as? VideoRendererAdapter)?.renderer } ?? []
+        let videoRenderers = track?.attachedVideoRenderers ?? []
         let isEnabled = videoRenderers.containsOneOrMoreAdaptiveStreamEnabledRenderers()
         var dimensions: Dimensions = .zero
 

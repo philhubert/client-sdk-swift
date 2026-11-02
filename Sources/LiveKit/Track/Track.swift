@@ -127,6 +127,13 @@ public class Track: NSObject, @unchecked Sendable, Loggable {
 
     let _state: StateSync<State>
 
+    /// DokeTime fork: the renderers attached to this track. `add`/`remove(videoRenderer:)` mutate
+    /// the table under `_state`'s lock from any thread, so it's enumerated under that lock too.
+    var attachedVideoRenderers: [VideoRenderer] {
+        _state.read { $0.videoRendererAdapters.objectEnumerator()?.allObjects ?? [] }
+            .compactMap { ($0 as? VideoRendererAdapter)?.renderer }
+    }
+
     // MARK: - Private
 
     private let _statisticsTimer = AsyncTimer(interval: 1.0)
