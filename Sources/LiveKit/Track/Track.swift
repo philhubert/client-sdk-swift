@@ -134,6 +134,11 @@ public class Track: NSObject, @unchecked Sendable, Loggable {
             .compactMap { ($0 as? VideoRendererAdapter)?.renderer }
     }
 
+    /// DokeTime fork: how many renderers are attached, read under the same lock.
+    var attachedVideoRendererCount: Int {
+        _state.read { $0.videoRendererAdapters.count }
+    }
+
     // MARK: - Private
 
     private let _statisticsTimer = AsyncTimer(interval: 1.0)

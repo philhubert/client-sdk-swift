@@ -49,11 +49,13 @@ struct AttachedVideoRenderersTests {
         let renderers = track.attachedVideoRenderers
         #expect(renderers.count == 1)
         #expect(renderers.first === renderer)
+        #expect(track.attachedVideoRendererCount == 1)
     }
 
     /// Another thread attaches and detaches, as the app's attach queue and the SDK's binder do,
-    /// while this one reads like the timer. Enumerating unlocked races the mutation.
-    @Test func readingWhileAnotherThreadAttachesIsSafe() {
+    /// while a third reads like the timer. Enumerating unlocked races the mutation. Both run on
+    /// their own threads, so the test waits without tying up a cooperative-pool thread.
+    @Test func readingWhileAnotherThreadAttachesIsSafe() async {
         let track = Self.makeTrack()
         let kept = Renderer()
         Self.attach(kept, to: track)
@@ -67,12 +69,26 @@ struct AttachedVideoRenderersTests {
             }
             done.mutate { $0 = true }
         }
-        writer.start()
 
-        var keptMissing = 0
-        while !done.read({ $0 }) {
-            if !track.attachedVideoRenderers.contains(where: { $0 === kept }) { keptMissing += 1 }
+        let misses = await withCheckedContinuation { (continuation: CheckedContinuation<(kept: Int, count: Int), Never>) in
+            let reader = Thread {
+                var keptMissing = 0
+                var undercounted = 0
+                while !done.read({ $0 }) {
+                    // `allObjects` hands back autoreleased objects; a thread of our own has
+                    // no pool draining them, and millions of reads would pile up.
+                    autoreleasepool {
+                        if !track.attachedVideoRenderers.contains(where: { $0 === kept }) { keptMissing += 1 }
+                        if track.attachedVideoRendererCount < 1 { undercounted += 1 }
+                    }
+                }
+                continuation.resume(returning: (keptMissing, undercounted))
+            }
+            writer.start()
+            reader.start()
         }
-        #expect(keptMissing == 0)
+        #expect(misses.kept == 0)
+        #expect(misses.count == 0)
+        withExtendedLifetime(kept) {}
     }
 }
