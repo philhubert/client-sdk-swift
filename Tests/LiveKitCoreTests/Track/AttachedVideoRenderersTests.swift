@@ -54,14 +54,17 @@ struct AttachedVideoRenderersTests {
 
     /// Another thread attaches and detaches, as the app's attach queue and the SDK's binder do,
     /// while a third reads like the timer. Enumerating unlocked races the mutation. Both run on
-    /// their own threads, so the test waits without tying up a cooperative-pool thread.
+    /// their own threads, so the test waits without tying up a cooperative-pool thread. The
+    /// writer waits until the reader is reading, so the two always overlap.
     @Test func readingWhileAnotherThreadAttachesIsSafe() async {
         let track = Self.makeTrack()
         let kept = Renderer()
         Self.attach(kept, to: track)
 
         let done = StateSync(false)
+        let readerStarted = DispatchSemaphore(value: 0)
         let writer = Thread {
+            readerStarted.wait()
             for _ in 0 ..< 50000 {
                 let renderer = Renderer()
                 Self.attach(renderer, to: track)
@@ -70,25 +73,28 @@ struct AttachedVideoRenderersTests {
             done.mutate { $0 = true }
         }
 
-        let misses = await withCheckedContinuation { (continuation: CheckedContinuation<(kept: Int, count: Int), Never>) in
+        typealias Tally = (reads: Int, keptMissing: Int, undercounted: Int)
+        let tally = await withCheckedContinuation { (continuation: CheckedContinuation<Tally, Never>) in
             let reader = Thread {
-                var keptMissing = 0
-                var undercounted = 0
-                while !done.read({ $0 }) {
+                var tally: Tally = (0, 0, 0)
+                repeat {
                     // `allObjects` hands back autoreleased objects; a thread of our own has
                     // no pool draining them, and millions of reads would pile up.
                     autoreleasepool {
-                        if !track.attachedVideoRenderers.contains(where: { $0 === kept }) { keptMissing += 1 }
-                        if track.attachedVideoRendererCount < 1 { undercounted += 1 }
+                        if !track.attachedVideoRenderers.contains(where: { $0 === kept }) { tally.keptMissing += 1 }
+                        if track.attachedVideoRendererCount < 1 { tally.undercounted += 1 }
                     }
-                }
-                continuation.resume(returning: (keptMissing, undercounted))
+                    tally.reads += 1
+                    if tally.reads == 1 { readerStarted.signal() }
+                } while !done.read({ $0 })
+                continuation.resume(returning: tally)
             }
             writer.start()
             reader.start()
         }
-        #expect(misses.kept == 0)
-        #expect(misses.count == 0)
+        #expect(tally.reads > 1)
+        #expect(tally.keptMissing == 0)
+        #expect(tally.undercounted == 0)
         withExtendedLifetime(kept) {}
     }
 }
