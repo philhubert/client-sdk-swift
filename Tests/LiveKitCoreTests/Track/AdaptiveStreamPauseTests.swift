@@ -62,8 +62,9 @@ struct AdaptiveStreamPauseTests {
         }
     }
 
-    /// 720p frames that differ from one to the next, about 30 a second, with no camera.
-    private static func startCapture(into capturer: BufferCapturer) -> Task<Void, Never> {
+    /// 720p frames that differ from one to the next, about 30 a second, with no camera. Stops
+    /// when the returned handle is dropped.
+    private static func startCapture(into capturer: BufferCapturer) -> AnyTaskCancellable {
         Task.detached {
             let width = 1280, height = 720
             var pool: CVPixelBufferPool?
@@ -93,17 +94,17 @@ struct AdaptiveStreamPauseTests {
                 frame += 1
                 try? await Task.sleep(nanoseconds: 33_000_000)
             }
-        }
+        }.cancellable()
+    }
+
+    /// The video's inbound stream as the SDK last sampled it (about once a second).
+    private static func inbound(_ track: RemoteVideoTrack) -> InboundRtpStreamStatistics? {
+        let streams = track.statistics?.inboundRtpStream ?? []
+        return streams.first { $0.kind == "video" } ?? streams.first
     }
 
     private static func framesDecoded(_ track: RemoteVideoTrack) -> UInt {
-        let streams = track.statistics?.inboundRtpStream ?? []
-        return (streams.first { $0.kind == "video" } ?? streams.first)?.framesDecoded ?? 0
-    }
-
-    private static func packetsReceived(_ track: RemoteVideoTrack) -> UInt64 {
-        let streams = track.statistics?.inboundRtpStream ?? []
-        return (streams.first { $0.kind == "video" } ?? streams.first)?.packetsReceived ?? 0
+        inbound(track)?.framesDecoded ?? 0
     }
 
     private static func shouldReceive(_ track: RemoteVideoTrack) async -> Bool? {
@@ -111,17 +112,30 @@ struct AdaptiveStreamPauseTests {
         return await RTC.run { (mediaTrack.raw as? LKRTCVideoTrack)?.shouldReceive }
     }
 
-    /// Polls until `condition` holds; false if it never does within `seconds`.
-    private static func wait(upTo seconds: TimeInterval, until condition: () async -> Bool) async throws -> Bool {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline {
-            if await condition() { return true }
-            try await Task.sleep(nanoseconds: 100_000_000)
+    /// Waits for two samples in a row, taken at different times, that count the same packets:
+    /// nothing arrived between them. A stream that never counted a packet doesn't qualify, so a
+    /// rebuilt one, which starts over at zero, can't pass for a quiet one.
+    private static func waitUntilNothingArrives(on track: RemoteVideoTrack) async throws {
+        let previous = StateSync<(timestamp: Double, packets: UInt64)?>(nil)
+        try await poll(timeout: 15, interval: 0.1, for: "the paused video to stop arriving") {
+            guard let stream = inbound(track), let packets = stream.packetsReceived else { return false }
+            return previous.mutate { last in
+                guard let sample = last, sample.timestamp != stream.timestamp else {
+                    if last == nil { last = (stream.timestamp, packets) }
+                    return false
+                }
+                last = (stream.timestamp, packets)
+                return packets > 0 && packets == sample.packets
+            }
         }
-        return await condition()
     }
 
-    @Test func pausingKeepsTheReceiveStream() async throws {
+    /// A publisher sending synthetic H.264 video and a subscriber with adaptiveStream on, in one
+    /// room, end-to-end encrypted like the app's. Runs `body` once the subscriber holds the
+    /// video, and disconnects both on every path: a Room keeps itself alive through its transports.
+    private static func withSubscribedVideo(
+        _ body: (RemoteTrackPublication, RemoteVideoTrack) async throws -> Void
+    ) async throws {
         let roomName = "adaptive-pause-\(UUID().uuidString.prefix(8))"
         let key = UUID().uuidString
         let url = TestEnvironment.liveKitServerUrl()
@@ -136,14 +150,6 @@ struct AdaptiveStreamPauseTests {
         }
         let publisher = room(adaptiveStream: false)
         let subscriber = room(adaptiveStream: true)
-        var capture: Task<Void, Never>?
-
-        // A Room keeps itself alive through its transports: tear both down on every path.
-        func tearDown() async {
-            capture?.cancel()
-            await publisher.disconnect()
-            await subscriber.disconnect()
-        }
 
         do {
             try await publisher.connect(url: url, token: TestEnvironment.liveKitServerToken(
@@ -160,59 +166,65 @@ struct AdaptiveStreamPauseTests {
             )
             let capturer = try #require(bufferTrack.capturer as? BufferCapturer)
             // A frame must exist before publishing, or the publish can't resolve its dimensions.
-            capture = Self.startCapture(into: capturer)
+            let capture = startCapture(into: capturer)
+            defer { capture.cancel() }
             try await Task.sleep(nanoseconds: 500_000_000)
             try await publisher.localParticipant.publish(videoTrack: bufferTrack, options: VideoPublishOptions(
                 simulcast: true,
                 preferredCodec: .h264
             ))
 
-            var subscribed: (publication: RemoteTrackPublication, track: RemoteVideoTrack)?
-            _ = try await Self.wait(upTo: 30) {
+            @Sendable func subscribedVideo() -> (RemoteTrackPublication, RemoteVideoTrack)? {
                 guard let publication = subscriber.remoteParticipants.values.first?.videoTracks.first as? RemoteTrackPublication,
-                      let track = publication.track as? RemoteVideoTrack else { return false }
-                subscribed = (publication, track)
-                return true
+                      let track = publication.track as? RemoteVideoTrack else { return nil }
+                return (publication, track)
             }
-            let (publication, track) = try #require(subscribed)
+            try await poll(timeout: 30, interval: 0.1, for: "the subscriber to hold the video") { subscribedVideo() != nil }
+            let (publication, track) = try #require(subscribedVideo())
             await track.set(reportStatistics: true)
+            try await body(publication, track)
+        } catch {
+            await publisher.disconnect()
+            await subscriber.disconnect()
+            throw error
+        }
+        await publisher.disconnect()
+        await subscriber.disconnect()
+    }
 
+    @Test func pausingKeepsTheReceiveStream() async throws {
+        try await Self.withSubscribedVideo { publication, track in
             let counter = FrameCounter()
             let view = View()
             track.add(videoRenderer: counter)
             track.add(videoRenderer: view)
 
             // Flowing, long enough that the stream's counters are well off zero.
-            #expect(try await Self.wait(upTo: 30) { counter.count > 240 && Self.framesDecoded(track) > 240 },
-                    "the video never flowed")
+            try await poll(timeout: 30, interval: 0.1, for: "the video to flow") {
+                counter.count > 240 && Self.framesDecoded(track) > 240
+            }
             let decodedBeforePause = Self.framesDecoded(track)
 
             // Nothing shows it any more: adaptiveStream pauses it.
             view.set(onScreen: false)
-            #expect(try await Self.wait(upTo: 10) { !publication.isEnabled }, "adaptiveStream never paused the video")
+            try await poll(timeout: 10, interval: 0.05, for: "adaptiveStream to pause the video") { !publication.isEnabled }
             #expect(await Self.shouldReceive(track) == true,
                     "pausing set shouldReceive = false, which tears the receive stream down")
             // The pause itself is the server's: with the receive stream still up, what saves the
             // decoding is that nothing arrives.
-            try await Task.sleep(nanoseconds: 1_200_000_000)
-            let packetsEarlyInPause = Self.packetsReceived(track)
-            try await Task.sleep(nanoseconds: 1_500_000_000)
-            #expect(Self.packetsReceived(track) == packetsEarlyInPause, "the server kept sending a paused video")
+            try await Self.waitUntilNothingArrives(on: track)
 
             // Shown again: it must render again.
             let renderedWhilePaused = counter.count
             view.set(onScreen: true)
-            #expect(try await Self.wait(upTo: 15) { counter.count > renderedWhilePaused + 30 },
-                    "the video never rendered again after the pause")
+            try await poll(timeout: 15, interval: 0.05, for: "the video to render again after the pause") {
+                counter.count > renderedWhilePaused + 30
+            }
 
             // The same receive stream carried it: a rebuilt one counts from zero again, and
             // can't have caught up this soon.
             #expect(Self.framesDecoded(track) >= decodedBeforePause,
                     "the receive stream's counters started over: it was rebuilt across the pause")
-        } catch {
-            await tearDown()
-            throw error
         }
-        await tearDown()
     }
 }
