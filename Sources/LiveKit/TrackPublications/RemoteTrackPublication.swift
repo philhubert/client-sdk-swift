@@ -409,17 +409,23 @@ extension RemoteTrackPublication {
             log("[adaptiveStream] disabling sid: \(sid), videoRenderersCount: \(videoRenderers.count), \(viewsString)")
         }
 
-        if let mediaTrack = track?.mediaTrack, mediaTrack.kind == kLKRTCMediaStreamTrackKindVideo {
-            log("VideoTrack.shouldReceive: \(isEnabled)")
-            await RTC.run { (mediaTrack.raw as? LKRTCVideoTrack)?.shouldReceive = isEnabled }
-        }
+        // DokeTime fork: the pause is the server's alone. Upstream also set `shouldReceive` on
+        // the WebRTC track here, and `false` does not just stop decoding: libwebrtc tears the
+        // receive stream down and builds a new one (`StopReceiveStream` calls
+        // `RecreateReceiveStream`). The server is still sending at that moment, and on M150,
+        // which demuxes on the network thread, a packet resolved to the old stream reaches the
+        // handler for packets nobody owns. That fails to make a default stream for an SSRC that
+        // already has one, then clears that SSRC's sink: the video arrives and decodes, and no
+        // frame reaches a renderer again until it is resubscribed (webrtc-sdk/webrtc#330). Once
+        // the server stops sending there is nothing to decode, so the flag saved only the
+        // moment before that.
 
         do {
             try await send(trackSettings: newSettings)
         } catch {
             // Revert to old settings on failure. DokeTime fork: and leave a resync pending, so
-            // the next tick re-sends (and re-asserts `shouldReceive`, already flipped above)
-            // even if the computed settings have since swung back to `oldSettings`.
+            // the next tick re-sends even if the computed settings have since swung back to
+            // `oldSettings`.
             _state.mutate {
                 $0.trackSettings = oldSettings
                 $0.isTrackSettingsResyncPending = true
